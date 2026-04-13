@@ -8,6 +8,7 @@
  * Description : Parallel ICMP-based host discovery for Termux
  *               Works without root using system ping binary.
  * Platform    : Android/Termux (Linux ARMv8/x86)
+ * Compile     : gcc netpulse.c -o netpulse -lpthread
  */
 
 #include <stdio.h>
@@ -20,6 +21,7 @@
 #include <time.h>
 #include <stdint.h>
 #include <signal.h>
+#include <sys/ioctl.h>  /* ioctl(), TIOCGWINSZ, struct winsize — terminal size */
 
 /* ─── Configuration ────────────────────────────────────────────────────────── */
 #define MAX_HOSTS     65534   /* Max IPs in any subnet up to /2               */
@@ -64,23 +66,155 @@ static char  g_network[IP_LEN];
 
 
 /* ══════════════════════════════════════════════════════════════════════════════
- * BANNER
+ * TERMINAL WIDTH DETECTION
+ *   Priority: ioctl(TIOCGWINSZ) → $COLUMNS env var → fallback 80
+ * ══════════════════════════════════════════════════════════════════════════════ */
+static int get_term_width(void) {
+    struct winsize ws;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col >= 10)
+        return (int)ws.ws_col;
+    const char *env_cols = getenv("COLUMNS");
+    if (env_cols) {
+        int c = atoi(env_cols);
+        if (c > 0) return c;
+    }
+    return 80; /* safe default */
+}
+
+/* ── Helper: print a box horizontal rule (all UTF-8 single-width chars) ──
+ *   e.g. box_hrule("╔", "═", "╗", 38) → ╔══...══╗\n
+ *   'n' = number of fill repetitions (= inner width of box)              */
+static void box_hrule(const char *left, const char *fill,
+                       const char *right, int n) {
+    printf(CYAN "%s", left);
+    for (int i = 0; i < n; i++) printf("%s", fill);
+    printf("%s\n" RESET, right);
+}
+
+/* ── Helper: print a plain-text string centered inside a box row ──────────
+ *   box_w  = total box width including the two border characters
+ *   text   = plain string (no embedded ANSI codes)
+ *   e.g.  ║        NetPulse         ║                                     */
+static void box_row(const char *text, int box_w) {
+    int inner    = box_w - 2;           /* usable cols between │ borders    */
+    int text_len = (int)strlen(text);
+    int pad      = inner - text_len;
+    if (pad < 0) pad = 0;
+    int lpad = pad / 2;
+    int rpad = pad - lpad;
+    printf(CYAN "║" RESET "%*s%s%*s" CYAN "║\n" RESET,
+           lpad, "", text, rpad, "");
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+ * ADAPTIVE BANNER — auto-detects terminal width and picks the right tier
+ *
+ *  ≥ 75 cols  →  WIDE   : Full 8-letter ASCII block-art (70 cols) + tagline box
+ *  44–74 cols →  MEDIUM : Compact Unicode box, stylised N·E·T·P·U·L·S·E title
+ *  < 44 cols  →  NARROW : Minimal 3-line text-only banner
  * ══════════════════════════════════════════════════════════════════════════════ */
 static void print_banner(void) {
-    printf(CYAN
-        "\n"
-        "  ███╗   ██╗███████╗████████╗██████╗ ██╗   ██╗██╗     ███████╗███████╗\n"
-        "  ████╗  ██║██╔════╝╚══██╔══╝██╔══██╗██║   ██║██║     ██╔════╝██╔════╝\n"
-        "  ██╔██╗ ██║█████╗     ██║   ██████╔╝██║   ██║██║     ███████╗█████╗  \n"
-        "  ██║╚██╗██║██╔══╝     ██║   ██╔═══╝ ██║   ██║██║     ╚════██║██╔══╝  \n"
-        "  ██║ ╚████║███████╗   ██║   ██║     ╚██████╔╝███████╗███████║███████╗\n"
-        "  ╚═╝  ╚═══╝╚══════╝   ╚═╝   ╚═╝      ╚═════╝ ╚══════╝╚══════╝╚══════╝\n"
-        RESET);
-    printf(DIM CYAN
-        "  ┌─────────────────────────────────────────────────────────────────┐\n"
-        "  │  Rootless ICMP Network Scanner  │  v%-6s │  Made by Aryan Giri │\n"
-        "  └─────────────────────────────────────────────────────────────────┘\n"
-        RESET "\n", VERSION);
+    int cols = get_term_width();
+    printf("\n");
+
+    /* ════════════════════════════════════════════════════════
+     * TIER 1 — WIDE (≥ 75 cols)
+     *   Full block-letter logo (70 cols) + tagline box below
+     * ════════════════════════════════════════════════════════ */
+    if (cols >= 75) {
+        /* Block-letter logo — each row is exactly 70 cols (2 indent + 68 art) */
+        printf(CYAN
+            "  ███╗   ██╗███████╗████████╗██████╗ ██╗   ██╗██╗     ███████╗███████╗\n"
+            "  ████╗  ██║██╔════╝╚══██╔══╝██╔══██╗██║   ██║██║     ██╔════╝██╔════╝\n"
+            "  ██╔██╗ ██║█████╗     ██║   ██████╔╝██║   ██║██║     ███████╗█████╗  \n"
+            "  ██║╚██╗██║██╔══╝     ██║   ██╔═══╝ ██║   ██║██║     ╚════██║██╔══╝  \n"
+            "  ██║ ╚████║███████╗   ██║   ██║     ╚██████╔╝███████╗███████║███████╗\n"
+            "  ╚═╝  ╚═══╝╚══════╝   ╚═╝   ╚═╝      ╚═════╝ ╚══════╝╚══════╝╚══════╝\n"
+            RESET);
+
+        /*
+         * Tagline box: aligns with the art above (2-space indent).
+         * Inner width = 68 (matches art width of 68 cols).
+         * Content string is left-padded to fill exactly 68 chars.
+         */
+        #define WIDE_INNER 68
+        char tag[WIDE_INNER + 1];
+        snprintf(tag, sizeof(tag),
+                 "  Rootless ICMP Scanner  |  v%-4s  |  Made by Aryan Giri",
+                 VERSION);
+        /* Pad to exactly WIDE_INNER with spaces */
+        int tag_len = (int)strlen(tag);
+        int tag_rpad = WIDE_INNER - tag_len;
+        if (tag_rpad < 0) tag_rpad = 0;
+
+        printf(DIM CYAN "  ┌");
+        for (int i = 0; i < WIDE_INNER; i++) printf("─");
+        printf("┐\n");
+        printf("  │" RESET "%s%*s" DIM CYAN "│\n", tag, tag_rpad, "");
+        printf("  └");
+        for (int i = 0; i < WIDE_INNER; i++) printf("─");
+        printf("┘\n" RESET "\n");
+        #undef WIDE_INNER
+
+    /* ════════════════════════════════════════════════════════
+     * TIER 2 — MEDIUM (44–74 cols)
+     *   Full-width Unicode box, spaced-letter title, tagline
+     * ════════════════════════════════════════════════════════ */
+    } else if (cols >= 44) {
+        /*
+         * Box spans the full terminal width.
+         * box_w  = total cols (border-to-border)
+         * inner  = box_w - 2  (space between the two ║ chars)
+         */
+        int box_w = cols;
+        int inner = box_w - 2;
+
+        /* ── Top border ── */
+        box_hrule("╔", "═", "╗", inner);
+
+        /* ── Empty padding row ── */
+        box_row("", box_w);
+
+        /* ── Spaced-letter title (scales naturally) ── */
+        box_row("◆  N E T P U L S E  ◆", box_w);
+
+        /* ── Subtitle rows ── */
+        box_row("", box_w);
+        box_row("Rootless ICMP Network Scanner", box_w);
+        box_row("Made by Aryan Giri", box_w);
+        box_row("", box_w);
+
+        /* ── Mid-divider ── */
+        box_hrule("╠", "═", "╣", inner);
+
+        /* ── Version / info row ── */
+        char ver[64];
+        snprintf(ver, sizeof(ver), "v%s  |  ICMP Discovery  |  Termux", VERSION);
+        box_row(ver, box_w);
+
+        /* ── Bottom border ── */
+        box_hrule("╚", "═", "╝", inner);
+        printf("\n");
+
+    /* ════════════════════════════════════════════════════════
+     * TIER 3 — NARROW (< 44 cols)
+     *   Minimal 3-line plain-text banner; no box drawing.
+     *   Centres what it can within available width.
+     * ════════════════════════════════════════════════════════ */
+    } else {
+        /* Simple centred lines — use printf padding tricks */
+        int pad = (cols - 18) / 2; /* "[ NetPulse v1.0 ]" = 18 chars */
+        if (pad < 0) pad = 0;
+        printf(CYAN "%*s[ NetPulse v%-4s]\n" RESET, pad, "", VERSION);
+
+        pad = (cols - 26) / 2;     /* "Rootless ICMP Scanner" */
+        if (pad < 0) pad = 0;
+        printf(DIM "%*sRootless ICMP Scanner\n" RESET, pad, "");
+
+        pad = (cols - 18) / 2;     /* "Made by Aryan Giri" */
+        if (pad < 0) pad = 0;
+        printf(DIM "%*sMade by Aryan Giri\n\n" RESET, pad, "");
+    }
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════
